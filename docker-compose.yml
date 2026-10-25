@@ -1,5 +1,5 @@
 services:
-  db:
+  postgres:
     image: postgres:15-alpine
     restart: always
     network_mode: host
@@ -9,11 +9,31 @@ services:
       POSTGRES_DB: orders_db
     volumes:
       - db_data:/var/lib/postgresql/data
+      - ./docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
+
+  mlflow:
+    build: ./mlflow
+    restart: always
+    network_mode: host
+    command: >
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri postgresql+psycopg2://postgres:postgres_password_123@127.0.0.1:5432/mlflow
+      --serve-artifacts --artifacts-destination /mlartifacts
+    volumes:
+      - mlartifacts:/mlartifacts
+    depends_on:
+      - postgres
 
   forecast-api:
     build: ./forecast_api
     restart: always
     network_mode: host
+    environment:
+      MLFLOW_TRACKING_URI: http://127.0.0.1:5000
+      MODEL_NAME: house-price
+      MODEL_ALIAS: prod
+    depends_on:
+      - mlflow
 
   orders-api:
     build: ./orders_api
@@ -23,8 +43,20 @@ services:
       DATABASE_URL: postgresql://postgres:postgres_password_123@127.0.0.1:5432/orders_db
       FORECAST_API_URL: http://127.0.0.1:8001/predict
     depends_on:
-      - db
+      - postgres
       - forecast-api
+
+  trainer:
+    build: ./training_service
+    profiles: ["train"]
+    network_mode: host
+    environment:
+      MLFLOW_TRACKING_URI: http://127.0.0.1:5000
+      MLFLOW_EXPERIMENT_NAME: house-price
+    depends_on:
+      - mlflow
+      - postgres
 
 volumes:
   db_data:
+  mlartifacts:
