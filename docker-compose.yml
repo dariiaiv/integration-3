@@ -3,7 +3,7 @@ services:
     image: postgres:15-alpine
     restart: always
     environment:
-      POSTGRES_USER: user
+      POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres_password_123
       POSTGRES_DB: orders_db
     volumes:
@@ -21,7 +21,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: postgresql://user:postgres_password_123@db:5432/orders_db
+      DATABASE_URL: postgresql://postgres:postgres_password_123@db:5432/orders_db
       FORECAST_API_URL: http://forecast-api:8001/predict
     depends_on:
       - db
