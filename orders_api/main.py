@@ -1,6 +1,5 @@
 import asyncio
 import os
-import socket
 import logging
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -14,7 +13,8 @@ import asyncpg
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("orders-api")
 
-FORECAST_API_URL = os.getenv("FORECAST_API_URL", "http://forecast-api:8001/predict")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres_password_123@127.0.0.1:5432/orders_db")
+FORECAST_API_URL = os.getenv("FORECAST_API_URL", "http://127.0.0.1:8001/predict")
 BATCH_MAX_ITEMS = int(os.getenv("BATCH_MAX_ITEMS", "50"))
 JWT_SECRET = "supersecretjwtkey_12345"
 
@@ -26,23 +26,14 @@ async def lifespan(app: FastAPI):
     global http_client, db_pool
     http_client = httpx.AsyncClient(timeout=5.0)
     
-    # Визначаємо прямий IPv4 адреси бази 'db', щоб уникнути зависання IPv6
-    try:
-        db_ip = socket.gethostbyname("db")
-    except Exception:
-        db_ip = "db"
-    
-    db_url = f"postgresql://postgres:postgres_password_123@{db_ip}:5432/orders_db"
-    logger.info(f"Підключення до БД за адресою: {db_url}")
-
+    logger.info("Підключення до PostgreSQL через 127.0.0.1:5432...")
     for attempt in range(1, 16):
         try:
-            logger.info(f"Спроба підключення до БД ({attempt}/15)...")
-            db_pool = await asyncpg.create_pool(db_url, min_size=1, max_size=5, timeout=5)
+            db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
             logger.info("Успішно підключено до PostgreSQL!")
             break
         except Exception as e:
-            logger.warning(f"БД ще не готова ({repr(e)}), повтор через 2 сек...")
+            logger.warning(f"БД ще стартує ({repr(e)}), чекаємо 2 сек...")
             await asyncio.sleep(2)
     else:
         raise RuntimeError("Не вдалося підключитися до БД")
@@ -87,7 +78,7 @@ class OrderUpdate(BaseModel):
     rooms: Optional[float] = None
 
 async def calculate_forecast_bg(order_id: int, area: float, rooms: int):
-    logger.info(f"[{datetime.now(timezone.utc)}] Фоновий розрахунок для замовлення #{order_id}")
+    logger.info(f"[{datetime.now(timezone.utc)}] Фоновий прогноз для замовлення #{order_id}")
     try:
         async with db_pool.acquire() as conn:
             exists = await conn.fetchval("SELECT id FROM orders WHERE id = $1", order_id)

@@ -2,6 +2,7 @@ services:
   db:
     image: postgres:15-alpine
     restart: always
+    network_mode: host
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres_password_123
@@ -12,17 +13,15 @@ services:
   forecast-api:
     build: ./forecast_api
     restart: always
-    expose:
-      - "8001"
+    network_mode: host
 
   orders-api:
     build: ./orders_api
     restart: always
-    ports:
-      - "8000:8000"
+    network_mode: host
     environment:
-      DATABASE_URL: postgresql://postgres:postgres_password_123@db:5432/orders_db
-      FORECAST_API_URL: http://forecast-api:8001/predict
+      DATABASE_URL: postgresql://postgres:postgres_password_123@127.0.0.1:5432/orders_db
+      FORECAST_API_URL: http://127.0.0.1:8001/predict
     depends_on:
       - db
       - forecast-api
