@@ -4,17 +4,10 @@ services:
     restart: always
     environment:
       POSTGRES_USER: user
-      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      POSTGRES_PASSWORD: postgres_password_123
       POSTGRES_DB: orders_db
-    secrets:
-      - db_password
     volumes:
       - db_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user -d orders_db"]
-      interval: 3s
-      timeout: 3s
-      retries: 5
 
   forecast-api:
     build: ./forecast_api
@@ -30,19 +23,9 @@ services:
     environment:
       DATABASE_URL: postgresql://user:postgres_password_123@db:5432/orders_db
       FORECAST_API_URL: http://forecast-api:8001/predict
-    secrets:
-      - jwt_secret
     depends_on:
-      db:
-        condition: service_healthy
-      forecast-api:
-        condition: service_started
-
-secrets:
-  db_password:
-    file: ./secrets/db_password.txt
-  jwt_secret:
-    file: ./secrets/jwt_secret.txt
+      - db
+      - forecast-api
 
 volumes:
   db_data:

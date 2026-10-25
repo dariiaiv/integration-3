@@ -25,16 +25,23 @@ db_pool: asyncpg.Pool = None
 async def lifespan(app: FastAPI):
     global http_client, db_pool
     http_client = httpx.AsyncClient(timeout=5.0)
-    db_pool = await asyncpg.create_pool(DATABASE_URL)
     
-    # Ініціалізація таблиць і міграція
+    # Цикл очікування підключення до БД (до 15 спроб)
+    for attempt in range(1, 16):
+        try:
+            logger.info(f"Спроба підключення до БД ({attempt}/15)...")
+            db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+            logger.info("Успішно підключено до PostgreSQL!")
+            break
+        except Exception as e:
+            logger.warning(f"БД ще не готова ({e}), повтор через 2 сек...")
+            await asyncio.sleep(2)
+    else:
+        raise RuntimeError("Не вдалося підключитися до БД")
+    
+    # Створення таблиць
     async with db_pool.acquire() as conn:
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id SERIAL PRIMARY KEY,
-                username VARCHAR(50) UNIQUE NOT NULL,
-                password VARCHAR(100) NOT NULL
-            );
             CREATE TABLE IF NOT EXISTS orders (
                 id SERIAL PRIMARY KEY,
                 client_name VARCHAR(100) NOT NULL,
@@ -48,11 +55,11 @@ async def lifespan(app: FastAPI):
         """)
     yield
     await http_client.aclose()
-    await db_pool.close()
+    if db_pool:
+        await db_pool.close()
 
 app = FastAPI(title="Orders API", lifespan=lifespan)
 
-#перевірка токена
 def verify_token(authorization: Optional[str] = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -60,7 +67,6 @@ def verify_token(authorization: Optional[str] = Header(None)):
     if token != JWT_SECRET:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-#Схеми даних
 class OrderCreate(BaseModel):
     client_name: str
     client_phone: str
@@ -73,15 +79,12 @@ class OrderUpdate(BaseModel):
     area: Optional[float] = None
     rooms: Optional[float] = None
 
-#Фонове завдання
 async def calculate_forecast_bg(order_id: int, area: float, rooms: int):
-    logger.info(f"[{datetime.now(timezone.utc)}] Початок фонового прогнозу для замовлення #{order_id}")
+    logger.info(f"[{datetime.now(timezone.utc)}] Фоновий розрахунок для замовлення #{order_id}")
     try:
-        # Перевіряємо чи замовлення існує (вимога 4.2.8)
         async with db_pool.acquire() as conn:
             exists = await conn.fetchval("SELECT id FROM orders WHERE id = $1", order_id)
             if not exists:
-                logger.warning(f"Замовлення #{order_id} було видалено до обробки")
                 return
 
         response = await http_client.post(FORECAST_API_URL, json={"area": area, "rooms": int(rooms)})
@@ -89,17 +92,14 @@ async def calculate_forecast_bg(order_id: int, area: float, rooms: int):
             price = response.json().get("predicted_price")
             async with db_pool.acquire() as conn:
                 await conn.execute("UPDATE orders SET status = 'priced', predicted_price = $1 WHERE id = $2", price, order_id)
-            logger.info(f"[{datetime.now(timezone.utc)}] Замовлення #{order_id} успішно розраховано: {price}")
+            logger.info(f"Замовлення #{order_id} розраховано: {price}")
         else:
-            raise Exception("Forecast API returned error")
+            raise Exception("Forecast error")
     except Exception as e:
-        logger.error(f"[{datetime.now(timezone.utc)}] Помилка обчислення прогнозу для #{order_id}: {e}")
+        logger.error(f"Помилка прогнозу для #{order_id}: {e}")
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE orders SET status = 'failed' WHERE id = $1", order_id)
 
-#Ендпоінти
-
-#Відкладене створення одного замовлення
 @app.post("/orders", status_code=status.HTTP_202_ACCEPTED)
 async def create_order(order: OrderCreate, background_tasks: BackgroundTasks, response: Response, auth: str = Header(None, alias="Authorization")):
     verify_token(auth)
@@ -113,22 +113,18 @@ async def create_order(order: OrderCreate, background_tasks: BackgroundTasks, re
     background_tasks.add_task(calculate_forecast_bg, order_id, order.area, order.rooms)
     return {"id": order_id, "status": "pending", "message": "Order created, forecast in progress"}
 
-#Пакетна паралельна обробка
 @app.post("/orders/batch")
 async def create_orders_batch(orders: List[OrderCreate], auth: str = Header(None, alias="Authorization")):
     verify_token(auth)
     if len(orders) > BATCH_MAX_ITEMS:
-        raise HTTPException(status_code=422, detail=f"Кількість замовлень перевищує ліміт {BATCH_MAX_ITEMS}")
+        raise HTTPException(status_code=422, detail=f"Перевищено ліміт {BATCH_MAX_ITEMS}")
 
     async def process_single(index: int, item: OrderCreate):
-        # 1. Зберігаємо замовлення
         async with db_pool.acquire() as conn:
             order_id = await conn.fetchval(
                 "INSERT INTO orders (client_name, client_phone, area, rooms, status) VALUES ($1, $2, $3, $4, 'pending') RETURNING id",
                 item.client_name, item.client_phone, item.area, item.rooms
             )
-        
-        # запит до прогнозу
         try:
             res = await http_client.post(FORECAST_API_URL, json={"area": item.area, "rooms": item.rooms}, timeout=2.0)
             if res.status_code == 200:
@@ -143,11 +139,9 @@ async def create_orders_batch(orders: List[OrderCreate], auth: str = Header(None
                 await conn.execute("UPDATE orders SET status = 'failed' WHERE id = $1", order_id)
             return {"index": index, "order_id": order_id, "status": "failed", "error": "ForecastUnavailable"}
 
-    # Конкурентне паралельне виконання через asyncio.gather
     results = await asyncio.gather(*(process_single(i, item) for i, item in enumerate(orders)))
     return {"total": len(orders), "results": results}
 
-#Оновлення замовлення
 @app.patch("/orders/{order_id}")
 async def update_order(order_id: int, update: OrderUpdate, background_tasks: BackgroundTasks, auth: str = Header(None, alias="Authorization")):
     verify_token(auth)
@@ -158,7 +152,7 @@ async def update_order(order_id: int, update: OrderUpdate, background_tasks: Bac
 
         new_name = update.client_name if update.client_name is not None else curr["client_name"]
         new_phone = update.client_phone if update.client_phone is not None else curr["client_phone"]
-
+        
         recalc = False
         new_area = curr["area"]
         new_rooms = curr["rooms"]
@@ -180,7 +174,6 @@ async def update_order(order_id: int, update: OrderUpdate, background_tasks: Bac
             await conn.execute("UPDATE orders SET client_name=$1, client_phone=$2 WHERE id=$3", new_name, new_phone, order_id)
             return {"id": order_id, "status": curr["status"], "message": "Client details updated"}
 
-# Отримання замовлень
 @app.get("/orders")
 async def get_orders(auth: str = Header(None, alias="Authorization")):
     verify_token(auth)
