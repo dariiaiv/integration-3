@@ -1,5 +1,8 @@
+# 1. Оновлюємо orders_api/main.py (додаємо пряме перетворення хоста в IPv4)
+cat << 'EOF' > orders_api/main.py
 import asyncio
 import os
+import socket
 import logging
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -13,7 +16,6 @@ import asyncpg
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("orders-api")
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:postgres_password_123@db:5432/orders_db")
 FORECAST_API_URL = os.getenv("FORECAST_API_URL", "http://forecast-api:8001/predict")
 BATCH_MAX_ITEMS = int(os.getenv("BATCH_MAX_ITEMS", "50"))
 JWT_SECRET = "supersecretjwtkey_12345"
@@ -26,20 +28,27 @@ async def lifespan(app: FastAPI):
     global http_client, db_pool
     http_client = httpx.AsyncClient(timeout=5.0)
     
-    # Цикл очікування підключення до БД (до 15 спроб)
+    # Визначаємо прямий IPv4 адреси бази 'db', щоб уникнути зависання IPv6
+    try:
+        db_ip = socket.gethostbyname("db")
+    except Exception:
+        db_ip = "db"
+    
+    db_url = f"postgresql://postgres:postgres_password_123@{db_ip}:5432/orders_db"
+    logger.info(f"Підключення до БД за адресою: {db_url}")
+
     for attempt in range(1, 16):
         try:
             logger.info(f"Спроба підключення до БД ({attempt}/15)...")
-            db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+            db_pool = await asyncpg.create_pool(db_url, min_size=1, max_size=5, timeout=5)
             logger.info("Успішно підключено до PostgreSQL!")
             break
         except Exception as e:
-            logger.warning(f"БД ще не готова ({e}), повтор через 2 сек...")
+            logger.warning(f"БД ще не готова ({repr(e)}), повтор через 2 сек...")
             await asyncio.sleep(2)
     else:
         raise RuntimeError("Не вдалося підключитися до БД")
     
-    # Створення таблиць
     async with db_pool.acquire() as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS orders (
