@@ -1,5 +1,3 @@
-# 1. Оновлюємо orders_api/main.py (додаємо пряме перетворення хоста в IPv4)
-cat << 'EOF' > orders_api/main.py
 import asyncio
 import os
 import socket
